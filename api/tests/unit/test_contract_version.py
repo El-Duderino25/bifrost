@@ -236,7 +236,14 @@ EXPECTED_CONTRACT_FINGERPRINT = (
     #
     # IntegrationCreate/IntegrationUpdate gained optional description
     # (2026-09-09). ADDITIVE: older clients omit it and keep existing behavior.
-    "ab0febdc63454f2a731b072c6306052853d8da53aabc7cbc04fa4b4ce0323b83"
+    #
+    # Solution access flags renamed with dual-name compat (2026-09-16, SPIKE).
+    # allow_outbound_access is canonical; global_repo_access is still accepted
+    # on input and emitted (deprecated) on output. allow_inbound_access added
+    # (default true). WorkflowExecutionRequest/EmitEventRequest gained optional
+    # caller_solution(_id). ADDITIVE: old clients use the old key / omit the
+    # new fields and keep prior behavior; fingerprint refreshed only.
+    "231c1d9334919ae83b068f2123ac58b2eb75efa881e6a4efd2d5a8f1858c1a28"
 )
 
 

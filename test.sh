@@ -19,6 +19,7 @@
 #
 # Quality checks:
 #   ./test.sh quality api               Run API pyright + ruff inside Docker.
+#   ./test.sh quality repo              Run local repository CI hygiene checks.
 #
 # Client tests:
 #   ./test.sh client unit               Vitest on the host (no stack).
@@ -29,6 +30,7 @@
 #   ./test.sh client e2e e2e/auth.unauth.spec.ts   Pass through to playwright.
 #
 # CI escape hatch:
+#   ./test.sh pr-preflight              Local repository, changed E2E, unit, quality, and CodeQL gate before opening a PR.
 #   ./test.sh pre-pr                    Optional full local reproduction of the merge gate (diagnostic).
 #   ./test.sh ci                        Full isolated run: up, all tests, down.
 #
@@ -351,8 +353,9 @@ cmd_quality() {
     shift || true
     case "$sub" in
         api) quality_api "$@" ;;
+        repo) repository_ci_checks "$@" ;;
         *)
-            echo "Usage: ./test.sh quality api [args]" >&2
+            echo "Usage: ./test.sh quality {api|repo} [args]" >&2
             exit 2
             ;;
     esac
@@ -404,6 +407,7 @@ client_ci_checks() {
 
 repository_ci_checks() {
     bash scripts/lib/test_stack_lock_test.sh
+    python3 -m unittest scripts.test_codeql_changed_lines
     echo "Checking GitHub Action pins..."
     python3 api/scripts/check_github_action_pins.py --verify-versions
 
@@ -609,6 +613,30 @@ cmd_pre_pr() {
     fi
 }
 
+cmd_pr_preflight() {
+    local path
+    local -a changed_e2e_tests=()
+    git fetch --quiet origin main
+    repository_ci_checks
+    quality_api
+    stack_up
+    cmd_unit
+    while IFS= read -r path; do
+        if [[ "${path##*/}" == test_*.py ]]; then
+            changed_e2e_tests+=("${path#api/}")
+        fi
+    done < <(git diff --name-only --diff-filter=ACMR origin/main...HEAD -- api/tests/e2e/)
+    if ((${#changed_e2e_tests[@]})); then
+        echo "Running changed backend E2E test files: ${changed_e2e_tests[*]}"
+        # Match CI's credential-free E2E lane; optional live GitHub tests use
+        # a separate external repository and do not run in the merge queue.
+        GITHUB_TEST_PAT= run_pytest "${changed_e2e_tests[@]}" -v
+    fi
+    client_ci_checks
+    scripts/codeql-local.sh --rebuild --changed-only --fail-on-alerts
+    scripts/codeql-local.sh --rebuild --lang javascript --changed-only --fail-on-alerts
+}
+
 # =============================================================================
 # Dispatch
 # =============================================================================
@@ -641,6 +669,7 @@ case "$1" in
     all) shift; cmd_all "$@" ;;
     quality) shift; cmd_quality "$@" ;;
     client) shift; cmd_client "$@" ;;
+    pr-preflight) shift; cmd_pr_preflight "$@" ;;
     pre-pr) shift; cmd_pre_pr "$@" ;;
     ci) cmd_ci ;;
     -h|--help|help)

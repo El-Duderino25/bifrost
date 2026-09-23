@@ -579,4 +579,3 @@ registration wiring, subscription guard). Four findings changed the code:
 Deferred with reasons: durable autonomous identity + credential renewal are
 Slice 3 design (no placeholder schema); Pydantic 422s match platform
 convention; creation-time form/agent guards already exact-match safe.
-

@@ -249,10 +249,14 @@ EXPECTED_CONTRACT_FINGERPRINT = (
     # PlatformJobPublic gained execution_backend (2026-09-17). ADDITIVE: old
     # clients ignore the placement detail and keep polling status as before.
     #
+    # PlatformJobStatus gained requires_action (2026-09-21). BREAKING: older
+    # polling CLIs cannot parse the new PlatformJobPublic enum value, so
+    # MIN_CLI_VERSION was raised to 1.4.2. CONTRACT_VERSION remains frozen.
+    #
     # ServicePolicyUpdate newly fingerprinted (2026-09-22): `bifrost services
     # update` sends it (greenfield coverage — no old CLI sends this DTO, so
     # nothing breaks). Fingerprint refreshed only.
-    "9641fe20f9e561dd73c924919590bd3fa895b2a5be473f7088afe7f102099ce4"
+    "15581748fa3f44098bec3703c4e8c4bea8681be96dedf6dfbc419a1c5a900dec"
 )
 
 

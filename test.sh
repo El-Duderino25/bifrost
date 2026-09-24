@@ -34,10 +34,7 @@
 #   ./test.sh pre-pr                    Optional full local reproduction of the merge gate (diagnostic).
 #   ./test.sh ci                        Full isolated run: up, all tests, down.
 #
-# Global flags (apply to most subcommands):
-#   --no-reset    Skip state reset before running tests.
-#   --coverage    Enable coverage reporting (backend only).
-#   --wait        On failure, pause before cleanup.
+# Pytest flags follow a test selector (for example, `./test.sh tests/unit/test_foo.py -v`).
 
 set -euo pipefail
 
@@ -408,6 +405,7 @@ client_ci_checks() {
 repository_ci_checks() {
     bash scripts/lib/test_stack_lock_test.sh
     python3 -m unittest scripts.test_codeql_changed_lines
+    python3 -m unittest scripts.test_e2e_shard
     echo "Checking GitHub Action pins..."
     python3 api/scripts/check_github_action_pins.py --verify-versions
 

@@ -513,6 +513,7 @@ class EventProcessor:
             return Deliver(
                 data=deliver.data,
                 event_type=deliver.event_type,
+                event_id=event.id,
             )
 
         deliveries_created = 0
@@ -564,6 +565,7 @@ class EventProcessor:
         return Deliver(
             data=deliver.data,
             event_type=deliver.event_type,
+            event_id=event.id,
         )
 
     async def _broadcast_event_update(
@@ -739,6 +741,16 @@ class EventProcessor:
         workflow = delivery.workflow
         if not workflow:
             raise ValueError(f"Delivery {delivery.id} has no workflow")
+
+        # Safety net: services cannot be one-shot targets. Creation paths
+        # reject them, but rows converted after subscribing (or written around
+        # the guards) must fail loudly here instead of executing as workflows.
+        if workflow.type == "service":
+            raise ValueError(
+                f"Delivery {delivery.id} targets service '{workflow.name}' "
+                "(type='service'), which cannot be executed one-shot. "
+                "Remove the subscription or convert the workflow."
+            )
 
         # Get subscription for input_mapping
         subscription = delivery.subscription

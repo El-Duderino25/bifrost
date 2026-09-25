@@ -23,6 +23,7 @@ services:
       POSTGRES_DB: bifrost_test
       POSTGRES_USER: bifrost
       POSTGRES_PASSWORD: bifrost_test
+      POSTGRES_INITDB_ARGS: --locale=en_US.UTF-8
     # No ports exposed - all access via Docker network
     tmpfs:
       - /var/lib/postgresql/data  # Ephemeral storage - fresh each run
@@ -99,6 +100,8 @@ services:
   # Stores workspace files and runtime outputs
   seaweedfs:
     image: chrislusf/seaweedfs:latest
+    # Its default admin gRPC port 33646 can collide with an ephemeral port.
+    command: ["mini", "-dir=/data", "-admin.port=12646"]
     environment:
       AWS_ACCESS_KEY_ID: bifrost
       AWS_SECRET_ACCESS_KEY: bifrost_test_key
@@ -146,6 +149,8 @@ services:
       BIFROST_REDIS_URL: redis://redis:6379/0
       BIFROST_SECRET_KEY: test-secret-key-for-e2e-testing-must-be-32-chars
       BIFROST_ENVIRONMENT: testing
+      # Browser-facing callbacks use the Playwright loopback client proxy.
+      BIFROST_PUBLIC_URL: http://localhost:3000
       # The full E2E suite intentionally reuses session-scoped users. Keep its
       # access tokens valid for the longest supported local/CI run.
       BIFROST_ACCESS_TOKEN_EXPIRE_MINUTES: "120"
@@ -218,6 +223,9 @@ services:
       BIFROST_REDIS_URL: redis://redis:6379/0
       BIFROST_SECRET_KEY: test-secret-key-for-e2e-testing-must-be-32-chars
       BIFROST_ENVIRONMENT: testing
+      # Exercise the same claim/beat transitions without production idle intervals.
+      BIFROST_SERVICE_CLAIM_INTERVAL_SECONDS: "1"
+      BIFROST_SERVICE_HEARTBEAT_INTERVAL_SECONDS: "2"
       # S3-compatible object storage
       BIFROST_S3_BUCKET: bifrost-test
       BIFROST_S3_ENDPOINT_URL: http://seaweedfs:8333
@@ -290,6 +298,11 @@ services:
       - ./api/shared:/app/shared:ro
       - ./api/bifrost:/app/bifrost:ro
       - test-mounts:/mounts
+      # Platform jobs (Solution git sync, workspace imports) run on the
+      # scheduler, so it needs the same file:// fixture repos the api clones
+      # server-side. Same safety shape as the api mount: only the
+      # uid-1000-created fixture subdir, never the LOG_DIR root.
+      - ${LOG_DIR:-/tmp/bifrost}/solution-repo-fixtures:/tmp/bifrost/solution-repo-fixtures
     depends_on:
       pgbouncer:
         condition: service_healthy
@@ -386,6 +399,9 @@ services:
       - ./api/Dockerfile.dev:/app/api/Dockerfile.dev:ro
       - ./.github/workflows:/app/.github/workflows:ro  # CI topology contract tests
       - ./test.sh:/app/test.sh:ro
+      - ./k8s:/k8s:ro  # Kubernetes deployment contract tests
+      - ./deploy:/deploy:ro  # Optional Kubernetes deployment overlays
+      - ./scripts/kubernetes:/scripts/kubernetes:ro
       - ./docker-compose.test.yml:/app/docker-compose.test.yml:ro  # Read-only —
                                       # the harness guard in
                                       # tests/unit/test_compose_test_harness.py
@@ -434,6 +450,10 @@ services:
   # complete Vitest suite against the same source snapshot.
   client-check-runner:
     image: bifrost-test-client-check:latest
+    environment:
+      # Respect Vitest's worker override on shared development hosts while
+      # retaining the configured default when no override is supplied.
+      VITEST_MAX_WORKERS: ${VITEST_MAX_WORKERS:-}
     build:
       context: ./client
       dockerfile: Dockerfile

@@ -89,6 +89,7 @@ ALLOW_LIST_INLINE_ORG: set[tuple[str, str, str]] = {
     ('routers/export_import.py', 'mapping_query = mapping_query.where(IntegrationMapping.organization_id == org_id)', 'manifest sync inline; phase 8 follow-up'),
     ('routers/export_import.py', 'mapping_query = mapping_query.where(IntegrationMapping.organization_id.is_(None))', 'manifest sync inline; phase 8 follow-up'),
     ('routers/integrations.py', 'IntegrationMapping.organization_id == org_id,', 'integration mapping inline; phase 6 migrates'),
+    ('routers/integrations.py', 'OAuthToken.organization_id.is_(None),', 'integration health summary exact-scope lookup for the global default OAuth token (NOT cascade)'),
     ('routers/integrations.py', 'ConfigModel.organization_id.is_(None),', 'integration config inline; phase 5 migrates'),
     ('routers/integrations.py', 'ConfigModel.organization_id == organization_id,', 'integration config inline; phase 5 migrates'),
     ('routers/integrations.py', 'ConfigModel.organization_id == org_id,', 'integration config inline; phase 5 migrates'),
@@ -225,6 +226,10 @@ class TestNoInlineOrgScopingInRouters:
 # resolved by cascade. They do NOT need an OrgScopedRepository subclass.
 # See api/src/repositories/README.md for the classification table.
 IDENTITY_MODELS: set[str] = {
+    # Launcher collections are owner/shared identity records, never execution
+    # name-cascade resources. shared.home enforces owner/admin/org visibility
+    # and filters every resource reference through its own access checks.
+    "HomeCollection",
     "Execution",
     "ExecutionMetricsDaily",
     "WorkflowROIDaily",
@@ -247,7 +252,11 @@ IDENTITY_MODELS: set[str] = {
     # Artifacts are opaque file identities authorized by creator/org and
     # workspace membership. They are never resolved through the name cascade.
     "Artifact",
-    # File policies resolve with the SAME org→global cascade-and-override as
+    # Service definitions are platform-admin-only control-plane records
+    # (all endpoints require CurrentSuperuser). They are resolved by
+    # definition UUID, never through the org-to-global name cascade;
+    # worker access is lease-fenced, not cascade-resolved.
+    "ServiceDefinition",    # File policies resolve with the SAME org→global cascade-and-override as
     # OrgScopedRepository (org-specific prefix wins; fall back to the global
     # (org=NULL) prefix), so a global `shared/<prefix>` policy cascades to every
     # org's users. They are allow-listed rather than routed through

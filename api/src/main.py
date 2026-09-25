@@ -19,6 +19,7 @@ from src.config import get_settings
 from src.models.contracts.common import ErrorResponse
 from src.core.csrf import CSRFMiddleware
 from src.core.embed_middleware import EmbedScopeMiddleware
+from src.core.request_body_limit import RouteBodyLimitMiddleware
 from src.core.database import close_db, get_session_factory, init_db
 from src.core.pubsub import manager as pubsub_manager
 from src.routers.health import close_health_check_clients
@@ -55,6 +56,7 @@ from src.routers import (
     profile_router,
     memory_router,
     memory_admin_router,
+    kubernetes_admin_router,
     required_instructions_admin_router,
     required_instructions_router,
     agent_runs_router,
@@ -74,6 +76,7 @@ from src.routers import (
     tools_router,
     mcp_router,
     events_router,
+    services_router,
     hooks_router,
     tables_router,
     claims_router,
@@ -161,6 +164,25 @@ async def app_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("Built-in policy rules seeded")
     except Exception as e:
         logger.warning(f"Built-in policy rule seeding failed: {e}")
+
+    # Announce Kubernetes execution transitions (enabled/disabled) once per
+    # change. Never fails startup; the snapshot comparison is idempotent
+    # across replicas.
+    try:
+        from src.services.kubernetes_execution import (
+            announce_detection_if_transitioned,
+        )
+
+        session_factory = get_session_factory()
+        async with session_factory() as db:
+            outcome = await announce_detection_if_transitioned(db)
+            await db.commit()
+            if outcome is not None:
+                logger.info(
+                    "Kubernetes execution transition announced: %s", outcome
+                )
+    except Exception as e:
+        logger.warning(f"Kubernetes detection announcement failed: {e}")
 
     logger.info(f"Bifrost API started in {settings.environment} mode")
 
@@ -463,6 +485,16 @@ def create_app() -> FastAPI:
         expose_headers=["Mcp-Session-Id"],
     )
 
+    # This route accepts multipart uploads.  The cap must run before
+    # Starlette constructs UploadFile and spills a body to disk.
+    from src.services.solutions.zip_install import MAX_SOLUTION_ARCHIVE_BYTES
+    app.add_middleware(
+        RouteBodyLimitMiddleware,
+        limits={
+            ("POST", "/api/solutions/import-workspace/preview"): MAX_SOLUTION_ARCHIVE_BYTES,
+        },
+    )
+
     # Add CSRF protection middleware
     # Only enforces for cookie-based auth with unsafe methods (POST, PUT, DELETE, PATCH)
     # Bearer token auth is exempt since browsers don't automatically include it
@@ -470,11 +502,6 @@ def create_app() -> FastAPI:
 
     # Restrict embed tokens to app-rendering endpoints only
     app.add_middleware(EmbedScopeMiddleware)
-
-    # Return allocator arenas after large table JSON requests have fully sent.
-    # This prevents request bursts from becoming permanent pod RSS high-water.
-    from src.core.allocation_trim import AllocationTrimMiddleware
-    app.add_middleware(AllocationTrimMiddleware)
 
     # Set request-scoped ContextVars for user attribution and session tracking
     from src.core.request_context import RequestUser, set_request_user, set_request_session_id
@@ -550,6 +577,8 @@ def create_app() -> FastAPI:
         return response
 
     # Register routers
+    from src.routers.home import router as home_router
+    app.include_router(home_router)
     app.include_router(health_router)
     app.include_router(version_router)
     app.include_router(auth_router)
@@ -583,6 +612,7 @@ def create_app() -> FastAPI:
     app.include_router(profile_router)
     app.include_router(memory_router)
     app.include_router(memory_admin_router)
+    app.include_router(kubernetes_admin_router)
     app.include_router(required_instructions_router)
     app.include_router(required_instructions_admin_router)
     app.include_router(agents_router)
@@ -602,6 +632,7 @@ def create_app() -> FastAPI:
     app.include_router(tools_router)
     app.include_router(mcp_router)
     app.include_router(events_router)
+    app.include_router(services_router)
     app.include_router(hooks_router)
     app.include_router(tables_router)
     app.include_router(claims_router)

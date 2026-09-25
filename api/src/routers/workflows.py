@@ -100,7 +100,11 @@ def _is_uuid_workflow_ref(identifier: str) -> bool:
     return True
 
 
-def _convert_workflow_orm_to_schema(workflow: WorkflowORM, used_by_count: int = 0) -> WorkflowMetadata:
+def _convert_workflow_orm_to_schema(
+    workflow: WorkflowORM,
+    used_by_count: int = 0,
+    role_ids: list[UUID] | None = None,
+) -> WorkflowMetadata:
     """Convert ORM model to Pydantic schema for API response."""
     from typing import Literal
     from src.models.contracts.workflows import ExecutableType
@@ -131,6 +135,7 @@ def _convert_workflow_orm_to_schema(workflow: WorkflowORM, used_by_count: int = 
         is_solution_managed=workflow.solution_id is not None,
         solution_id=workflow.solution_id,
         access_level=workflow.access_level or "role_based",
+        role_ids=[str(role_id) for role_id in (role_ids or [])],
         parameters=parameters,
         execution_mode=execution_mode,
         timeout_seconds=workflow.timeout_seconds if workflow.timeout_seconds is not None else 1800,
@@ -186,6 +191,22 @@ def _extract_workflows_from_props(obj: Any, workflow_ids: set[str]) -> None:
     elif isinstance(obj, list):
         for item in obj:
             _extract_workflows_from_props(item, workflow_ids)
+
+
+async def _get_workflow_role_ids(db: DbSession, workflow_ids: list[UUID]) -> dict[UUID, list[UUID]]:
+    """Return assigned role IDs keyed by workflow ID for a workflow batch."""
+    if not workflow_ids:
+        return {}
+
+    result = await db.execute(
+        select(WorkflowRole.workflow_id, WorkflowRole.role_id)
+        .where(WorkflowRole.workflow_id.in_(workflow_ids))
+        .order_by(WorkflowRole.workflow_id, WorkflowRole.role_id)
+    )
+    role_ids_by_workflow: dict[UUID, list[UUID]] = {}
+    for workflow_id, role_id in result.all():
+        role_ids_by_workflow.setdefault(workflow_id, []).append(role_id)
+    return role_ids_by_workflow
 
 
 async def _get_form_workflow_ids(db: DbSession, form_id: UUID) -> set[UUID]:
@@ -480,15 +501,21 @@ async def list_workflows(
         # form_fields (data_provider_id), and agent_tools.
         workflow_ids = [w.id for w in workflows]
         used_by_counts: dict[UUID, int] = {}
+        role_ids_by_workflow: dict[UUID, list[UUID]] = {}
         if workflow_ids:
             used_by_counts = await _compute_used_by_counts(db, workflow_ids)
+            role_ids_by_workflow = await _get_workflow_role_ids(db, workflow_ids)
 
         # Convert ORM models to Pydantic schemas
         workflow_list = []
         for w in workflows:
             try:
                 workflow_list.append(
-                    _convert_workflow_orm_to_schema(w, used_by_count=used_by_counts.get(w.id, 0))
+                    _convert_workflow_orm_to_schema(
+                        w,
+                        used_by_count=used_by_counts.get(w.id, 0),
+                        role_ids=role_ids_by_workflow.get(w.id, []),
+                    )
                 )
             except Exception as e:
                 logger.error(f"Failed to convert workflow '{w.name}': {e}")
@@ -792,13 +819,26 @@ async def execute_workflow(
     # resolves to THIS install's own workflow, not a sibling install's that
     # shares the path (Codex #8 P1) nor the bare _repo/ one. solution_id (a
     # form/agent) > form_id > app_id. A bad/foreign ref yields no scope.
-    solution_scope = await derive_execution_solution_scope(
-        db,
-        ctx,
-        solution_id=request.solution_id,
-        form_id=request.form_id,
-        app_id=request.app_id,
-    )
+    # An explicitly denied/sealed target raises SolutionInboundDenied — 404
+    # WITHOUT shared fallback (a denied install must never execute a loose
+    # same-path workflow).
+    from src.services.solution_scope import SolutionInboundDenied
+
+    try:
+        solution_scope = await derive_execution_solution_scope(
+            db,
+            ctx,
+            solution_id=request.solution_id,
+            form_id=request.form_id,
+            app_id=request.app_id,
+            target_org_id=lookup_org_id,
+            caller_solution_id=request.caller_solution_id,
+        )
+    except SolutionInboundDenied:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"message": f"Workflow '{request.workflow_id}' not found"},
+        ) from None
     allow_shared_workflow = (
         solution_scope is None
         or await solution_allows_global(db, solution_scope)
@@ -1276,7 +1316,7 @@ async def register_workflow(
                 dec_name = dec.id
             elif isinstance(dec, ast.Call) and isinstance(dec.func, ast.Name):
                 dec_name = dec.func.id
-            if dec_name in ("workflow", "tool", "data_provider"):
+            if dec_name in ("workflow", "tool", "data_provider", "service"):
                 target_node = node
                 target_decorator_type = dec_name
                 break
@@ -1299,8 +1339,19 @@ async def register_workflow(
     existing_wf = existing.scalar_one_or_none()
 
     wf_type = "data_provider" if target_decorator_type == "data_provider" else (
-        "tool" if target_decorator_type == "tool" else "workflow"
+        "tool" if target_decorator_type == "tool" else (
+            "service" if target_decorator_type == "service" else "workflow"
+        )
     )
+
+    # Services hold a connection indefinitely on the event loop — a sync
+    # function would block its worker forever. Reject at registration.
+    if wf_type == "service" and not isinstance(target_node, ast.AsyncFunctionDef):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Service '{request.function_name}' must be declared with "
+            "'async def'. Long-lived services run on the worker event loop.",
+        )
 
     # Org targeting follows the unified --org standard (mirrors config's
     # set_config): if organization_id was explicitly provided (even as null),
@@ -1396,6 +1447,13 @@ async def register_workflow(
         select(WorkflowORM).where(WorkflowORM.id == workflow_id)
     )
     workflow = result.scalar_one()
+
+    # 6b. Reconcile the service definition with the registered row: service
+    # rows get an ensured definition; rows converting away from service are
+    # parked (disabled + stopped) so stale desire can never launch them.
+    from src.services.service_lifecycle import sync_definition_for_registration
+
+    await sync_definition_for_registration(db, workflow, created_by=user.email)
 
     # Commit before refreshing MCP tools. refresh_workflow_tools() opens its
     # own session via get_db_context(), and at READ COMMITTED it cannot see
@@ -1671,7 +1729,8 @@ async def update_workflow(
             logger.warning(f"Failed to refresh MCP workflow tools: {e}")
 
         logger.info(f"Updated workflow '{log_safe(workflow.name)}' organization_id={log_safe(workflow.organization_id)}, access_level={log_safe(workflow.access_level)}")
-        return _convert_workflow_orm_to_schema(workflow)
+        role_ids = (await _get_workflow_role_ids(db, [workflow.id])).get(workflow.id, [])
+        return _convert_workflow_orm_to_schema(workflow, role_ids=role_ids)
 
     except HTTPException:
         raise

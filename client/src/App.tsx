@@ -31,15 +31,16 @@ import {
 import { lazyWithReload } from "@/lib/lazy-with-reload";
 import { RunFormRoute } from "@/pages/run-form-route";
 import { RouteOpeningState } from "@/components/layout/RouteOpeningState";
-import { RouteReadyReveal } from "@/components/layout/RouteReadyReveal";
 import { RouteLoadError } from "@/components/layout/RouteLoadError";
 import {
 	agentDetailLoader,
 	applicationDetailLoader,
 } from "@/lib/detail-route-loaders";
-import { routeRevealKey as getRouteRevealKey } from "@/lib/route-reveal-key";
 
 // Lazy load all page components for code splitting
+const Home = lazyWithReload(() =>
+	import("@/pages/Home").then((m) => ({ default: m.Home })),
+);
 const Dashboard = lazyWithReload(() =>
 	import("@/pages/Dashboard").then((m) => ({ default: m.Dashboard })),
 );
@@ -97,6 +98,14 @@ const FormBuilder = lazyWithReload(() =>
 );
 const Workflows = lazyWithReload(() =>
 	import("@/pages/Workflows").then((m) => ({ default: m.Workflows })),
+);
+const ServiceDetail = lazyWithReload(() =>
+	import("@/pages/ServiceDetail").then((m) => ({
+		default: m.ServiceDetail,
+	})),
+);
+const Services = lazyWithReload(() =>
+	import("@/pages/Services").then((m) => ({ default: m.Services })),
 );
 const ExecuteWorkflow = lazyWithReload(() =>
 	import("@/pages/ExecuteWorkflow").then((m) => ({
@@ -229,7 +238,7 @@ const MCPConnectionEdit = lazyWithReload(() =>
 	})),
 );
 
-function AppFrame() {
+export function AppFrame() {
 	const { brandingLoaded } = useOrgScope();
 	const applicationName = useApplicationName();
 	const location = useLocation();
@@ -266,11 +275,6 @@ function AppFrame() {
 			null ||
 			matchPath("/apps/:applicationId/*", location.pathname) !== null) &&
 		matchPath("/apps/:applicationId/edit/*", location.pathname) === null;
-	// App routes own their nested navigation. Keep their runtime mounted while
-	// the wildcard portion changes so inline_v1 does not detach its stylesheet
-	// and standalone_v2 does not tear down its React root. Other platform routes
-	// retain the keyed reveal animation on every completed navigation.
-	const routeRevealKey = getRouteRevealKey(location.pathname, location.key);
 	useEffect(() => {
 		if (isAppRunnerRoute) return;
 		document.title = applicationName;
@@ -299,9 +303,7 @@ function AppFrame() {
 			<UnifiedDock />
 
 			<Suspense fallback={<PageLoader />}>
-				<RouteReadyReveal key={routeRevealKey}>
-					<Outlet />
-				</RouteReadyReveal>
+				<Outlet />
 			</Suspense>
 		</>
 	);
@@ -367,8 +369,16 @@ const routeElements = (
 		/>
 
 		<Route path="/" element={<Layout />}>
-			{/* Dashboard - PlatformAdmin only (OrgUsers redirected to /forms) */}
-			<Route index element={<Dashboard />} />
+			{/* Home is available to authenticated users; metrics remain admin-only. */}
+			<Route index element={<Home />} />
+			<Route
+				path="dashboard"
+				element={
+					<ProtectedRoute requirePlatformAdmin>
+						<Dashboard />
+					</ProtectedRoute>
+				}
+			/>
 
 			{/* Workflows - PlatformAdmin only */}
 			<Route
@@ -376,6 +386,22 @@ const routeElements = (
 				element={
 					<ProtectedRoute requirePlatformAdmin>
 						<Workflows />
+					</ProtectedRoute>
+				}
+			/>
+			<Route
+				path="services"
+				element={
+					<ProtectedRoute requirePlatformAdmin>
+						<Services />
+					</ProtectedRoute>
+				}
+			/>
+			<Route
+				path="services/:serviceId"
+				element={
+					<ProtectedRoute requirePlatformAdmin>
+						<ServiceDetail />
 					</ProtectedRoute>
 				}
 			/>

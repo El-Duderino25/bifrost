@@ -23,6 +23,7 @@ from typing import Any, Awaitable, TypedDict, cast
 import redis.asyncio as redis
 
 from src.config import get_settings
+from src.core.cache.keys import active_execution_key
 from src.core.log_safety import log_safe
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,20 @@ class PendingExecution(TypedDict):
     artifact_workspace_id: str | None
     created_at: str  # ISO format
     cancelled: bool
+
+
+class ActiveExecution(TypedDict):
+    """Compact completion metadata retained by the process-pool parent."""
+
+    execution_id: str
+    workflow_id: str | None
+    workflow_name: str
+    org_id: str | None
+    user_id: str | None
+    user_name: str
+    user_email: str | None
+    sync: bool
+    event: dict[str, Any] | None
 
 
 class RedisClient:
@@ -220,6 +235,17 @@ class RedisClient:
         except Exception as e:
             logger.error(f"Failed to delete pending execution: {e}")
             raise
+
+    async def get_active_execution(
+        self,
+        execution_id: str,
+    ) -> ActiveExecution | None:
+        """Read the compact parent-owned lease for a running execution."""
+        redis_client = await self._get_redis()
+        data = await redis_client.get(active_execution_key(execution_id))
+        if data is None:
+            return None
+        return cast(ActiveExecution, json.loads(data))
 
     async def set_pending_cancelled(self, execution_id: str) -> bool:
         """
@@ -631,7 +657,7 @@ class RedisClient:
         Get cached workflow metadata by ID.
 
         Used by execution service to skip DB lookup for workflow metadata.
-        Returns: {id, name, file_path, timeout_seconds, time_saved, value, execution_mode}
+        Returns: {id, name, file_path, timeout_seconds, time_saved, value, execution_mode, type}
 
         Args:
             workflow_id: Workflow UUID
@@ -660,6 +686,7 @@ class RedisClient:
         time_saved: int,
         value: float,
         execution_mode: str,
+        type: str = "workflow",
     ) -> None:
         """
         Cache workflow metadata.
@@ -674,6 +701,7 @@ class RedisClient:
             time_saved: ROI time saved value
             value: ROI monetary value
             execution_mode: "sync" or "async"
+            type: Executable type discriminator (workflow, tool, data_provider, service)
         """
         redis_client = await self._get_redis()
         key = f"{WORKFLOW_METADATA_CACHE_PREFIX}{workflow_id}"
@@ -688,6 +716,7 @@ class RedisClient:
             "time_saved": time_saved,
             "value": normalized_value,
             "execution_mode": execution_mode,
+            "type": type,
         }
 
         try:

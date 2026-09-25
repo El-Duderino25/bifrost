@@ -3,8 +3,86 @@
 Validates that the consumer uses short-lived sessions (no persistent session).
 """
 
-import pytest
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
+
+import pytest
+
+
+class TestCompletionMetadataRecovery:
+    """PostgreSQL must recover terminal bookkeeping after Redis data loss."""
+
+    @pytest.mark.asyncio
+    async def test_missing_active_lease_reconstructs_metadata_from_execution_row(self):
+        from src.jobs.consumers.workflow_execution import WorkflowExecutionConsumer
+
+        execution = MagicMock()
+        execution.id = UUID("00000000-0000-0000-0000-000000000004")
+        execution.workflow_id = UUID("00000000-0000-0000-0000-000000000001")
+        execution.workflow_name = "long_scan"
+        execution.organization_id = UUID("00000000-0000-0000-0000-000000000002")
+        execution.executed_by = UUID("00000000-0000-0000-0000-000000000003")
+        execution.executed_by_name = "Test User"
+
+        query_result = MagicMock()
+        query_result.one_or_none.return_value = (execution, "test@example.com")
+        session = AsyncMock()
+        session.execute.return_value = query_result
+
+        with patch.object(WorkflowExecutionConsumer, "__init__", lambda self: None):
+            consumer = WorkflowExecutionConsumer()
+            consumer._redis_client = AsyncMock()
+            consumer._redis_client.get_active_execution.return_value = None
+
+            metadata, recovered = await consumer._load_completion_metadata(
+                str(execution.id), session
+            )
+
+        assert recovered is True
+        assert metadata == {
+            "execution_id": str(execution.id),
+            "workflow_id": str(execution.workflow_id),
+            "workflow_name": "long_scan",
+            "org_id": str(execution.organization_id),
+            "user_id": str(execution.executed_by),
+            "user_name": "Test User",
+            "user_email": "test@example.com",
+            "sync": False,
+            "event": None,
+        }
+        statement = str(session.execute.await_args.args[0])
+        assert "executions.status IN" in statement
+
+    @pytest.mark.asyncio
+    async def test_active_lease_avoids_database_lookup(self):
+        from src.jobs.consumers.workflow_execution import WorkflowExecutionConsumer
+
+        active = {
+            "execution_id": "00000000-0000-0000-0000-000000000004",
+            "workflow_id": "00000000-0000-0000-0000-000000000001",
+            "workflow_name": "long_scan",
+            "org_id": "00000000-0000-0000-0000-000000000002",
+            "user_id": "00000000-0000-0000-0000-000000000003",
+            "user_name": "Test User",
+            "user_email": "test@example.com",
+            "sync": False,
+            "event": None,
+        }
+        session = AsyncMock()
+
+        with patch.object(WorkflowExecutionConsumer, "__init__", lambda self: None):
+            consumer = WorkflowExecutionConsumer()
+            consumer._redis_client = AsyncMock()
+            consumer._redis_client.get_active_execution.return_value = active
+
+            metadata, recovered = await consumer._load_completion_metadata(
+                active["execution_id"], session
+            )
+
+        assert metadata == active
+        assert recovered is False
+        session.execute.assert_not_awaited()
 
 
 class TestConsumerSessionLifecycle:
@@ -45,6 +123,55 @@ class TestConsumerSessionLifecycle:
             ):
                 # Should complete without error
                 await consumer.stop()
+
+    @pytest.mark.asyncio
+    async def test_drain_waits_for_child_results_before_stopping_pool(self):
+        """Shutdown must keep result handling alive after dispatch tasks finish."""
+        from src.jobs.consumers.workflow_execution import WorkflowExecutionConsumer
+
+        call_order: list[str] = []
+
+        async def drain_active_executions(_deadline: float) -> bool:
+            call_order.append("drain_children")
+            return True
+
+        async def stop_pool() -> None:
+            call_order.append("stop_pool")
+
+        async def close_channel(self) -> None:  # type: ignore[no-untyped-def]
+            call_order.append("close_channel")
+
+        queue = AsyncMock()
+        queue.cancel.side_effect = lambda _tag: call_order.append("cancel_consumer")
+        dispatch_task = asyncio.create_task(asyncio.sleep(0))
+
+        with patch.object(WorkflowExecutionConsumer, "__init__", lambda self: None):
+            consumer = WorkflowExecutionConsumer()
+            consumer._queue = queue
+            consumer._consumer_tag = "consumer-tag"
+            consumer._draining = False
+            consumer._inflight = {dispatch_task}
+            consumer._channel = AsyncMock()
+            consumer._connection_ctx = AsyncMock()
+            consumer.queue_name = "workflow-executions"
+            consumer._pool_started = True
+            consumer._pool = MagicMock()
+            consumer._pool.drain_active_executions = drain_active_executions
+            consumer._pool.active_execution_count.return_value = 0
+            consumer._pool.stop = stop_pool
+
+            with patch.object(
+                WorkflowExecutionConsumer.__bases__[0], "stop", close_channel
+            ):
+                await consumer.drain(deadline=1.0)
+
+        assert call_order == [
+            "cancel_consumer",
+            "drain_children",
+            "stop_pool",
+            "close_channel",
+        ]
+        assert consumer._pool_started is False
 
     @pytest.mark.asyncio
     async def test_no_get_db_session_method(self):
@@ -136,7 +263,7 @@ class TestSuccessfulExecutionCompletionOrder:
         with patch.object(WorkflowExecutionConsumer, "__init__", lambda self: None):
             consumer = WorkflowExecutionConsumer()
             consumer._redis_client = AsyncMock()
-            consumer._redis_client.get_pending_execution.return_value = {
+            consumer._redis_client.get_active_execution.return_value = {
                 "workflow_id": "00000000-0000-0000-0000-000000000001",
                 "workflow_name": "large_result_workflow",
                 "org_id": "00000000-0000-0000-0000-000000000002",
@@ -221,6 +348,7 @@ class TestSuccessfulExecutionCompletionOrder:
                         "status": "Success",
                         "result": {"rows": [{"value": "x" * 1000}]},
                         "duration_ms": 123,
+                        "sync": True,
                     },
                 )
 
@@ -267,7 +395,7 @@ class TestFailedExecutionCompletionOrder:
         with patch.object(WorkflowExecutionConsumer, "__init__", lambda self: None):
             consumer = WorkflowExecutionConsumer()
             consumer._redis_client = AsyncMock()
-            consumer._redis_client.get_pending_execution.return_value = {
+            consumer._redis_client.get_active_execution.return_value = {
                 "workflow_id": "00000000-0000-0000-0000-000000000001",
                 "workflow_name": "failed_workflow",
                 "org_id": "00000000-0000-0000-0000-000000000002",
@@ -353,6 +481,7 @@ class TestFailedExecutionCompletionOrder:
                         "error": "boom",
                         "error_type": "RuntimeError",
                         "duration_ms": 123,
+                        "sync": True,
                     },
                 )
 
@@ -385,7 +514,7 @@ class TestFailedExecutionCompletionOrder:
         with patch.object(WorkflowExecutionConsumer, "__init__", lambda self: None):
             consumer = WorkflowExecutionConsumer()
             consumer._redis_client = AsyncMock()
-            consumer._redis_client.get_pending_execution.return_value = {
+            consumer._redis_client.get_active_execution.return_value = {
                 "workflow_id": "00000000-0000-0000-0000-000000000001",
                 "workflow_name": "event_workflow",
                 "org_id": "00000000-0000-0000-0000-000000000002",
@@ -446,6 +575,7 @@ class TestFailedExecutionCompletionOrder:
                         "error": "boom",
                         "error_type": "RuntimeError",
                         "duration_ms": 123,
+                        "sync": False,
                         "logs": [{"message": "captured failure log"}],
                     },
                 )

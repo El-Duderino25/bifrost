@@ -12,8 +12,15 @@ from typing import Any
 from urllib.parse import urlencode
 
 from .client import get_client, raise_for_status_with_detail
-from .models import TableInfo, DocumentData, DocumentList, BatchResult, BatchDeleteResult
-from ._context import resolve_scope, _execution_context
+from .models import (
+    TableInfo,
+    DocumentData,
+    DocumentList,
+    BatchResult,
+    BatchDeleteResult,
+    BulkUpsertResult,
+)
+from ._context import resolve_scope, _execution_context, get_effective_solution
 
 
 def _current_context():
@@ -21,29 +28,49 @@ def _current_context():
     return _execution_context.get()
 
 
-def _scope_query(scope: str | None) -> str:
+def _scope_query(scope: str | None, solution: str | None = None) -> str:
     """Build the ``?scope=...&solution=...`` querystring for REST table URLs.
 
-    ``scope`` is the org scope (as before). When the active execution belongs to a
-    solution install, also append ``solution=<install_id>`` (from the
-    ExecutionContext) so the server resolves a table BY NAME to the install's OWN
-    table first, then the org/_repo/ cascade — the same own-first behavior a
-    Solution app gets via its ``X-Bifrost-App`` header. Omitted outside a solution
-    execution, so plain ``_repo/`` behavior is unchanged.
+    ``scope`` is the org scope (as before). ``solution`` is a per-call install
+    ref (UUID or slug/name) that wins over the inherited ExecutionContext for
+    this call only; unset → today's behavior (own install or _repo/).
+
+    SPIKE: whenever the execution inherits an install, ``caller_solution=``
+    attests it alongside, so a sealed target can tell own-calls
+    (caller == target) from cross-install calls.
     """
+    from ._context import get_caller_solution
+
     params: dict[str, str] = {}
     if scope:
         params["scope"] = scope
-    ctx = _current_context()
-    solution_id = getattr(ctx, "solution_id", None) if ctx is not None else None
+    solution_id = get_effective_solution(solution)
     if solution_id:
         params["solution"] = str(solution_id)
+    caller = get_caller_solution()
+    if caller:
+        params["caller_solution"] = str(caller)
     return f"?{urlencode(params)}" if params else ""
 
 
 def _has_solution_context() -> bool:
     ctx = _current_context()
     return bool(getattr(ctx, "solution_id", None)) if ctx is not None else False
+
+
+def _validate_batch_document_limit(documents: list[dict[str, Any]]) -> None:
+    if len(documents) > 1000:
+        raise ValueError("table batch writes accept at most 1000 documents")
+
+
+def _auto_create_allowed(explicit_solution: str | None) -> bool:
+    """Whether a 404 may trigger loose auto-create-on-insert.
+
+    Explicit per-call ``solution=`` targeting must never conjure a loose
+    shared table when the target is missing/inaccessible (Codex review P2) —
+    surface the 404 instead, same as inherited solution context does.
+    """
+    return not _has_solution_context() and explicit_solution is None
 
 
 async def _ensure_table_exists(table: str, scope: str | None) -> None:
@@ -223,6 +250,7 @@ class tables:
         id: str | None = None,
         scope: str | None = None,
         created_by: str | None = None,
+        solution: str | None = None,
     ) -> DocumentData:
         """
         Insert a document into a table.
@@ -256,9 +284,9 @@ class tables:
             body["created_by"] = created_by
 
         client = get_client()
-        url = f"/api/tables/{table}/documents{_scope_query(effective_scope)}"
+        url = f"/api/tables/{table}/documents{_scope_query(effective_scope, solution)}"
         response = await client.post(url, json=body)
-        if response.status_code == 404 and not _has_solution_context():
+        if response.status_code == 404 and _auto_create_allowed(solution):
             # Table doesn't exist — auto-create then retry.
             await _ensure_table_exists(table, effective_scope)
             response = await client.post(url, json=body)
@@ -310,10 +338,10 @@ class tables:
 
         client = get_client()
         url = f"/api/tables/{table}/documents/upsert{_scope_query(effective_scope)}"
-        response = await client.post(url, json=body)
+        response = await client.post(url, json=body, retry_transient=True)
         if response.status_code == 404 and not _has_solution_context():
             await _ensure_table_exists(table, effective_scope)
-            response = await client.post(url, json=body)
+            response = await client.post(url, json=body, retry_transient=True)
         raise_for_status_with_detail(response)
         return DocumentData.model_validate(response.json())
 
@@ -322,6 +350,7 @@ class tables:
         table: str,
         doc_id: str,
         scope: str | None = None,
+        solution: str | None = None,
     ) -> DocumentData | None:
         """
         Get a document by ID.
@@ -340,7 +369,7 @@ class tables:
         client = get_client()
         effective_scope = resolve_scope(scope)
         response = await client.get(
-            f"/api/tables/{table}/documents/{doc_id}{_scope_query(effective_scope)}",
+            f"/api/tables/{table}/documents/{doc_id}{_scope_query(effective_scope, solution)}",
         )
         if response.status_code == 404:
             return None
@@ -386,6 +415,7 @@ class tables:
         response = await client.patch(
             f"/api/tables/{table}/documents/{doc_id}{_scope_query(effective_scope)}",
             json=body,
+            retry_transient=True,
         )
         if response.status_code == 404:
             return None
@@ -510,6 +540,76 @@ class tables:
         )
 
     @staticmethod
+    async def bulk_upsert(
+        table: str,
+        documents: list[dict[str, Any]],
+        scope: str | None = None,
+        created_by: str | None = None,
+        updated_by: str | None = None,
+        conflict_retries: int = 2,
+    ) -> BulkUpsertResult:
+        """
+        Bulk upsert explicit-id documents with full replacement semantics.
+
+        This privileged ingestion method uses the canonical count-only
+        ``POST /documents/batch`` route with replacement upsert semantics. Each
+        document must have ``id`` and ``data`` keys. The server rejects
+        duplicate IDs.
+
+        Args:
+            table: Table name or UUID.
+            documents: List of dicts, each with "id" (str) and "data" (dict).
+            scope: Organization scope.
+            created_by: Override attribution on inserted rows.
+            updated_by: Override attribution on inserted and updated rows.
+            conflict_retries: Number of bounded retries when the server detects
+                a concurrent insert between policy preflight and the guarded
+                upsert statement.
+
+        Returns:
+            BulkUpsertResult: Count of rows inserted or updated.
+        """
+        _validate_batch_document_limit(documents)
+        ctx = _current_context()
+        if created_by is None and ctx is not None and getattr(ctx, "user_id", None) is not None:
+            created_by = str(ctx.user_id)
+        if updated_by is None and ctx is not None and getattr(ctx, "user_id", None) is not None:
+            updated_by = str(ctx.user_id)
+        effective_scope = resolve_scope(scope)
+
+        items: list[dict[str, Any]] = []
+        for doc in documents:
+            item: dict[str, Any] = {"id": doc["id"], "data": doc["data"]}
+            if created_by is not None:
+                item["created_by"] = created_by
+            if updated_by is not None:
+                item["updated_by"] = updated_by
+            items.append(item)
+
+        client = get_client()
+        url = f"/api/tables/{table}/documents/batch{_scope_query(effective_scope)}"
+        body = {
+            "documents": items,
+            "write_mode": "replace_upsert",
+            "return_documents": False,
+        }
+        attempts = max(0, conflict_retries) + 1
+        ensured_table = False
+        response = None
+        for attempt in range(attempts):
+            response = await client.post(url, json=body)
+            if response.status_code == 404 and not _has_solution_context() and not ensured_table:
+                await _ensure_table_exists(table, effective_scope)
+                ensured_table = True
+                response = await client.post(url, json=body)
+            if response.status_code != 409 or attempt == attempts - 1:
+                break
+        assert response is not None
+        raise_for_status_with_detail(response)
+        body = response.json()
+        return BulkUpsertResult(count=body["inserted"])
+
+    @staticmethod
     async def _batch_write(
         table: str,
         documents: list[dict[str, Any]],
@@ -524,6 +624,7 @@ class tables:
         override is applied per-item so the engine can attribute writes to
         the workflow's calling user.
         """
+        _validate_batch_document_limit(documents)
         ctx = _current_context()
         if created_by is None and ctx is not None and getattr(ctx, "user_id", None) is not None:
             created_by = str(ctx.user_id)
@@ -546,10 +647,11 @@ class tables:
         req_body: dict[str, Any] = {"documents": items, "upsert": upsert}
         client = get_client()
         url = f"/api/tables/{table}/documents/batch{_scope_query(effective_scope)}"
-        response = await client.post(url, json=req_body)
+        retry_transient = upsert and all(item["id"] for item in items)
+        response = await client.post(url, json=req_body, retry_transient=retry_transient)
         if response.status_code == 404 and not _has_solution_context():
             await _ensure_table_exists(table, effective_scope)
-            response = await client.post(url, json=req_body)
+            response = await client.post(url, json=req_body, retry_transient=retry_transient)
         raise_for_status_with_detail(response)
         body = response.json()
         return BatchResult(
@@ -604,6 +706,11 @@ class tables:
         limit: int = 100,
         offset: int = 0,
         scope: str | None = None,
+        after_document_id: str | None = None,
+        document_id_prefix: str | None = None,
+        skip_count: bool = False,
+        document_ids: list[str] | None = None,
+        solution: str | None = None,
     ) -> DocumentList:
         """
         Query documents with filtering and pagination.
@@ -623,6 +730,18 @@ class tables:
             limit: Maximum documents to return (default 100).
             offset: Number of documents to skip.
             scope: Organization scope.
+            after_document_id: Exclusive cursor over the actual document ID.
+                Activates ascending document-ID ordering. Pass an empty string
+                to begin an unbounded document-ID scan.
+            document_id_prefix: Restrict results to actual document IDs with
+                this prefix. Activates ascending document-ID ordering.
+            skip_count: Skip the matching count query and return ``total=-1``.
+            document_ids: Up to 1000 actual document IDs to match. Duplicates
+                have set semantics; an empty list returns no documents. ANDed
+                with other filters. Results follow normal query ordering and
+                pagination rather than input order.
+            solution: Target solution install (UUID or slug/name) in the
+                resolved scope. Unset → own install or _repo/. Per-call only.
 
         Returns:
             DocumentList: Query results with documents, total count, and
@@ -634,14 +753,19 @@ class tables:
         client = get_client()
         effective_scope = resolve_scope(scope)
         response = await client.post(
-            f"/api/tables/{table}/documents/query{_scope_query(effective_scope)}",
+            f"/api/tables/{table}/documents/query{_scope_query(effective_scope, solution)}",
             json={
                 "where": where,
                 "order_by": order_by,
                 "order_dir": order_dir,
                 "limit": limit,
                 "offset": offset,
+                "after_document_id": after_document_id,
+                "document_id_prefix": document_id_prefix,
+                "skip_count": skip_count,
+                "document_ids": document_ids,
             },
+            retry_transient=True,
         )
         if response.status_code == 404:
             return DocumentList(documents=[], total=0, limit=limit, offset=offset)

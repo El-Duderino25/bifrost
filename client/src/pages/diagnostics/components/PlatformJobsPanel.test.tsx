@@ -101,15 +101,39 @@ describe("PlatformJobsPanel", () => {
 		});
 	});
 
+	it("retries an initial load failure without presenting an empty list", async () => {
+		const user = userEvent.setup();
+		mocks.getPlatformJobs
+			.mockRejectedValueOnce(new Error("unavailable"))
+			.mockResolvedValue({
+				jobs: [queuedJob],
+				total: 1,
+				offset: 0,
+				limit: 25,
+			});
+		renderPanel();
+		await user.click(
+			await screen.findByRole("button", { name: "Retry jobs" }),
+		);
+		expect(
+			(await screen.findAllByText("Solution deploy"))[0],
+		).toBeInTheDocument();
+		expect(
+			screen.queryByText("No Platform Jobs Yet"),
+		).not.toBeInTheDocument();
+	});
+
 	it("shows on-demand jobs with an explainable memory wait and details", async () => {
 		const user = userEvent.setup();
 		renderPanel();
 
-		expect(await screen.findByText("Solution deploy")).toBeInTheDocument();
-		expect(screen.getByText("749 MiB available")).toBeInTheDocument();
-		expect(screen.getByText("768 MiB required")).toBeInTheDocument();
 		expect(
-			screen.getByText("Waiting for scheduler memory"),
+			(await screen.findAllByText("Solution deploy"))[0],
+		).toBeInTheDocument();
+		expect(screen.getAllByText("749 MiB available")[0]).toBeInTheDocument();
+		expect(screen.getAllByText("768 MiB required")[0]).toBeInTheDocument();
+		expect(
+			screen.getAllByText("Waiting for scheduler memory")[0],
 		).toBeInTheDocument();
 		expect(
 			screen
@@ -193,7 +217,7 @@ describe("PlatformJobsPanel", () => {
 				expect.objectContaining({ offset: 25 }),
 			),
 		);
-		expect(screen.getByText("Solution deploy")).toBeInTheDocument();
+		expect(screen.getAllByText("Solution deploy")[0]).toBeInTheDocument();
 		expect(screen.getByText("Page 1 of 2")).toBeInTheDocument();
 		expect(
 			screen.getByRole("columnheader", { name: "Name" }).closest("table")
@@ -203,7 +227,7 @@ describe("PlatformJobsPanel", () => {
 
 		await act(async () => resolveNextPage(secondPage));
 		expect(
-			await screen.findByText("Second page deploy"),
+			(await screen.findAllByText("Second page deploy"))[0],
 		).toBeInTheDocument();
 		expect(screen.getByText("Page 2 of 2")).toBeInTheDocument();
 
@@ -237,5 +261,55 @@ describe("PlatformJobsPanel", () => {
 		expect(
 			(await screen.findAllByText("Cancelled")).length,
 		).toBeGreaterThan(0);
+	});
+
+	it("marks Kubernetes-backed jobs without flagging local ones", async () => {
+		mocks.getPlatformJobs.mockResolvedValue({
+			jobs: [
+				queuedJob,
+				{
+					...queuedJob,
+					id: "10000000-0000-0000-0000-000000000002",
+					title: "Remote app build",
+					execution_backend: "kubernetes",
+				},
+			],
+			total: 2,
+			limit: 25,
+			offset: 0,
+		});
+		renderPanel();
+
+		expect(
+			(await screen.findAllByText("Remote app build"))[0],
+		).toBeInTheDocument();
+		expect(screen.getAllByText("Kubernetes").length).toBeGreaterThan(0);
+	});
+
+	it("filters and presents jobs requiring action", async () => {
+		const user = userEvent.setup();
+		mocks.getPlatformJobs.mockResolvedValue({
+			jobs: [{ ...queuedJob, status: "requires_action", title: "Confirm sync" }],
+			total: 1,
+			limit: 25,
+			offset: 0,
+		});
+		renderPanel();
+
+		await user.click(
+			await screen.findByRole("combobox", {
+				name: "Filter Platform Jobs by state",
+			}),
+		);
+		await user.click(
+			await screen.findByRole("option", { name: "Requires Action" }),
+		);
+
+		await waitFor(() =>
+			expect(mocks.getPlatformJobs).toHaveBeenCalledWith(
+				expect.objectContaining({ status: "requires_action" }),
+			),
+		);
+		expect(screen.getAllByText("Requires Action").length).toBeGreaterThan(0);
 	});
 });

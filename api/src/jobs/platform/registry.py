@@ -4,6 +4,9 @@ from src.jobs.platform.application_publish import (
     APPLICATION_PUBLISH_DEFINITION,
 )
 from src.jobs.platform.application_deploy import APPLICATION_DEPLOY_DEFINITION
+from src.jobs.platform.application_sdk_update import (
+    APPLICATION_SDK_UPDATE_DEFINITION,
+)
 from src.jobs.platform.base import PlatformJobDefinition
 from src.jobs.platform.system_maintenance import (
     ARTIFACT_RETENTION_CLEANUP_DEFINITION,
@@ -14,9 +17,11 @@ from src.jobs.platform.system_maintenance import (
 )
 from src.jobs.platform.solution_export import SOLUTION_EXPORT_DEFINITION
 from src.jobs.platform.solution_deploy import SOLUTION_DEPLOY_DEFINITION
+from src.jobs.platform.solution_git_sync import SOLUTION_GIT_SYNC_DEFINITION
 from src.jobs.platform.embedding_reindex import EMBEDDING_REINDEX_DEFINITION
 from src.jobs.platform.reimport import WORKSPACE_REIMPORT_DEFINITION
 from src.jobs.platform.git_operation import GIT_OPERATION_DEFINITION
+from src.jobs.platform.workspace_bundle_import import WORKSPACE_BUNDLE_IMPORT_DEFINITION
 from src.jobs.platform.summary_backfill import SUMMARY_BACKFILL_DEFINITION
 from src.jobs.platform.video_generation import (
     SDK_VIDEO_GENERATION_DEFINITION,
@@ -25,6 +30,7 @@ from src.jobs.platform.video_generation import (
 
 _DEFINITIONS = {
     APPLICATION_DEPLOY_DEFINITION.job_type: APPLICATION_DEPLOY_DEFINITION,
+    APPLICATION_SDK_UPDATE_DEFINITION.job_type: APPLICATION_SDK_UPDATE_DEFINITION,
     APPLICATION_PUBLISH_DEFINITION.job_type: APPLICATION_PUBLISH_DEFINITION,
     OAUTH_REFRESH_DEFINITION.job_type: OAUTH_REFRESH_DEFINITION,
     WEBHOOK_RENEWAL_DEFINITION.job_type: WEBHOOK_RENEWAL_DEFINITION,
@@ -33,9 +39,11 @@ _DEFINITIONS = {
     ARTIFACT_RETENTION_CLEANUP_DEFINITION.job_type: ARTIFACT_RETENTION_CLEANUP_DEFINITION,
     SOLUTION_EXPORT_DEFINITION.job_type: SOLUTION_EXPORT_DEFINITION,
     SOLUTION_DEPLOY_DEFINITION.job_type: SOLUTION_DEPLOY_DEFINITION,
+    SOLUTION_GIT_SYNC_DEFINITION.job_type: SOLUTION_GIT_SYNC_DEFINITION,
     EMBEDDING_REINDEX_DEFINITION.job_type: EMBEDDING_REINDEX_DEFINITION,
     WORKSPACE_REIMPORT_DEFINITION.job_type: WORKSPACE_REIMPORT_DEFINITION,
     GIT_OPERATION_DEFINITION.job_type: GIT_OPERATION_DEFINITION,
+    WORKSPACE_BUNDLE_IMPORT_DEFINITION.job_type: WORKSPACE_BUNDLE_IMPORT_DEFINITION,
     SUMMARY_BACKFILL_DEFINITION.job_type: SUMMARY_BACKFILL_DEFINITION,
     VIDEO_GENERATION_DEFINITION.job_type: VIDEO_GENERATION_DEFINITION,
     SDK_VIDEO_GENERATION_DEFINITION.job_type: SDK_VIDEO_GENERATION_DEFINITION,
@@ -44,3 +52,7 @@ _DEFINITIONS = {
 
 def get_platform_job_definition(job_type: str) -> PlatformJobDefinition | None:
     return _DEFINITIONS.get(job_type)
+
+
+def list_platform_job_definitions() -> list[PlatformJobDefinition]:
+    return list(_DEFINITIONS.values())

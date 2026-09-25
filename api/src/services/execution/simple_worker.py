@@ -4,20 +4,18 @@ Execution helpers for forked worker processes.
 This module provides the helpers that forked children (spawned by
 TemplateProcess via os.fork) use to run an execution:
 
-- install_requirements(): called once at pool startup to pip-install
-  user requirements. All forked children inherit the resulting
-  filesystem, so installing once in the parent is sufficient.
-- _clear_workspace_modules(): called before each execution so workflow
-  code changes are picked up from Redis.
+- install_requirements(): called by a temporary setup helper to pip-install
+  user requirements before the template starts. All forked children inherit
+  the resulting filesystem.
 - _execute_sync() / _execute_async(): run a single execution using context
   assembled by the parent consumer and delivered over a private pipe.
 - _get_process_rss() / _get_pss_bytes() / _capture_resource_metrics():
   per-process memory/resource reporting used by the pool for recycling
   bloated children.
 
-All callers live in template_process.py (fork path) and process_pool.py
-(install_requirements at pool startup). There is no longer a
-multiprocessing.spawn code path — forked children are created by
+Execution callers live in template_process.py. Requirements installation is
+invoked by requirements_setup_helper.py before any template starts. There is
+no multiprocessing.spawn code path — forked children are created by
 template_process.fork() and communicate via pipe-backed send/recv queues.
 """
 
@@ -29,36 +27,12 @@ import os
 import resource
 import subprocess
 import sys
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from src.services.execution.requirements_setup_result import FailedPackage, RequirementsInstallResult
+
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class FailedPackage:
-    """One requirements line that failed to install."""
-
-    package: str
-    error: str
-
-
-@dataclass
-class RequirementsInstallResult:
-    """Outcome of a pool requirements install attempt.
-
-    `ok` is True when nothing failed (including the trivial no-requirements
-    case). `installed` + `failed` partition `attempted`.
-    """
-
-    attempted: list[str] = field(default_factory=list)
-    installed: list[str] = field(default_factory=list)
-    failed: list[FailedPackage] = field(default_factory=list)
-
-    @property
-    def ok(self) -> bool:
-        return not self.failed
 
 
 def _parse_requirement_lines(content: str) -> list[str]:
@@ -179,109 +153,6 @@ def install_requirements() -> RequirementsInstallResult:
     return result
 
 
-def _clear_workspace_modules() -> None:
-    """
-    Clear workspace modules from sys.modules only if their content changed.
-
-    Called before each execution. For each workspace module already loaded,
-    checks the content hash against Redis. If unchanged, the module stays
-    in sys.modules and the next `import` is a no-op. If changed (or if the
-    hash check fails), the module is evicted so it gets re-fetched.
-
-    This avoids re-exec'ing large unchanged modules on every execution.
-    """
-    from src.services.execution.virtual_import import VirtualModuleLoader, NamespacePackageLoader
-    from src.core.module_cache_sync import get_module_sync
-
-    # Find workspace modules currently loaded
-    workspace_modules = [
-        (name, module) for name, module in sys.modules.items()
-        if module is not None and (
-            (hasattr(module, '__loader__') and isinstance(
-                module.__loader__, (VirtualModuleLoader, NamespacePackageLoader)
-            ))
-        )
-    ]
-
-    # Check each module's hash — only clear if content changed
-    modules_to_clear: list[str] = []
-    modules_kept = 0
-
-    for name, module in workspace_modules:
-        cached_hash = getattr(module, '__content_hash__', None)
-
-        if not cached_hash:
-            # No hash stored — could be a namespace package or exec_from_db module.
-            # Namespace packages are kept if any child modules are kept (decided later).
-            # For now, check if this is a namespace package (has __path__ but no __file__).
-            if isinstance(getattr(module, '__loader__', None), NamespacePackageLoader):
-                # Defer — we'll keep it if any children survive
-                continue
-            # exec_from_db module with no hash — always clear
-            modules_to_clear.append(name)
-            continue
-
-        # Look up current hash using the exact file path loaded by the virtual loader.
-        file_path = getattr(module, "__file__", None)
-        if not file_path:
-            # Can't map to a file path — clear to be safe
-            modules_to_clear.append(name)
-            continue
-
-        cached = get_module_sync(file_path)
-        if not cached:
-            # Module removed from cache — clear
-            modules_to_clear.append(name)
-            continue
-
-        loaded_storage_path = getattr(module, "__storage_path__", file_path)
-        if cached.get("storage_path", cached.get("path")) != loaded_storage_path:
-            # The same logical import now resolves from a different Solution or
-            # from a different Solution/global scope. Equal bytes are not enough
-            # to reuse a module object whose mutable globals belong to another
-            # execution boundary.
-            modules_to_clear.append(name)
-            continue
-
-        if cached.get("hash") != cached_hash:
-            # Content changed — clear
-            modules_to_clear.append(name)
-        else:
-            # Unchanged — keep it
-            modules_kept += 1
-
-    # If ANY workspace module changed, clear ALL workspace modules.
-    # Reason: kept modules may hold stale references to cleared modules
-    # via `from X import Y` bindings captured at import time.
-    if modules_to_clear:
-        modules_to_clear = [name for name, _ in workspace_modules]
-        modules_kept = 0
-
-    # Clear namespace packages only if ALL their children were cleared
-    cleared_set = set(modules_to_clear)
-    for name, module in workspace_modules:
-        if not isinstance(getattr(module, '__loader__', None), NamespacePackageLoader):
-            continue
-        # Check if any child module survived (not in cleared_set and still in sys.modules)
-        prefix = name + "."
-        has_surviving_child = any(
-            n.startswith(prefix) and n not in cleared_set
-            for n in sys.modules
-        )
-        if not has_surviving_child:
-            modules_to_clear.append(name)
-
-    for name in modules_to_clear:
-        if name in sys.modules:
-            del sys.modules[name]
-
-    if modules_to_clear or modules_kept:
-        logger.debug(
-            f"Workspace modules: cleared={len(modules_to_clear)} kept={modules_kept}"
-            + (f" (cleared: {modules_to_clear})" if modules_to_clear else "")
-        )
-
-
 def _execute_sync(
     execution_id: str,
     worker_id: str,
@@ -340,36 +211,18 @@ async def _execute_async(
     """
     start_time = datetime.now(timezone.utc)
 
-    # Activate THIS execution's Solution import root, THEN evict workspace
-    # modules — in that order. The cross-solution eviction in
-    # _clear_workspace_modules keys off the active install (get_solution_context);
-    # if it ran with no context (as the template_process fork path did), a prior
-    # install's same-name module could survive the hash check and shadow this
-    # install's file, breaking multi-install isolation (Codex #9). This context is
-    # temporary: _run_execution activates it again after credential bootstrap.
-    from src.core.module_cache_sync import clear_solution_context, set_solution_context
+    # Baseline PSS is captured before execution so both success and engine
+    # failure paths can report the memory growth attributable to this
+    # execution. Failed executions are often the highest-memory samples, so
+    # they must not go unrecorded.
+    baseline_pss = _get_pss_bytes()
 
-    _exec_solution_id = context.get("solution_id")
-    if _exec_solution_id:
-        set_solution_context(
-            _exec_solution_id,
-            global_repo_access=bool(context.get("solution_global_repo_access", False)),
-        )
+    # Run the execution using the shared core, which owns Solution context and
+    # workspace-module freshness.
     try:
-        _clear_workspace_modules()
-    finally:
-        # Credential backend imports must run without Solution namespace probing;
-        # otherwise their own API credential lookup can recursively import them.
-        clear_solution_context()
-    # 2. Run the execution using existing worker logic
-    # This reuses the shared _run_execution() from worker.py
-    try:
-        from src.services.execution.worker import _run_execution
+        from src.services.execution.worker import run_execution
 
-        # Capture baseline PSS before execution so we can measure the delta
-        baseline_pss = _get_pss_bytes()
-
-        result = await _run_execution(execution_id, context)
+        result = await run_execution(execution_id, context)
 
         # Calculate duration
         duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
@@ -387,7 +240,7 @@ async def _execute_async(
         if baseline_pss > 0 and end_pss > 0:
             metrics["peak_memory_bytes"] = max(0, end_pss - baseline_pss)
 
-        return {
+        envelope: dict[str, Any] = {
             "execution_id": execution_id,
             "success": success,
             "status": status,
@@ -405,6 +258,11 @@ async def _execute_async(
             "execution_context": result.get("execution_context"),
             "worker_id": worker_id,
         }
+        # Supervised services: pass the identity block through so the pool
+        # routes the envelope to attempt completion, not the execution path.
+        if isinstance(result.get("service"), dict):
+            envelope["service"] = result["service"]
+        return envelope
 
     except Exception as e:
         duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
@@ -416,6 +274,10 @@ async def _execute_async(
             "error_type": type(e).__name__,
             "duration_ms": duration_ms,
             "worker_id": worker_id,
+            # A failure snapshot, not a peak: PSS growth from before the
+            # execution started to the failure point. Absent (None) values
+            # mean "unknown", never zero usage.
+            "metrics": _capture_failure_metrics(baseline_pss),
         }
 
 
@@ -453,6 +315,28 @@ def _get_process_rss() -> int:
         # /proc not available (macOS) or unexpected line format — caller treats 0 as unknown
         logger.debug(f"could not read /proc/self/status VmRSS: {e}")
     return 0
+
+
+def _capture_failure_metrics(baseline_pss: int) -> dict[str, Any]:
+    """Capture a best-effort resource snapshot for a failed execution.
+
+    Returns PSS growth since ``baseline_pss`` when both readings are
+    available, plus cumulative CPU time. Uses ``None`` (not ``0``) for
+    unknown memory so downstream aggregation can distinguish "no sample"
+    from "no usage".
+    """
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    end_pss = _get_pss_bytes()
+    if baseline_pss > 0 and end_pss > 0:
+        peak_memory_bytes: int | None = max(0, end_pss - baseline_pss)
+    else:
+        peak_memory_bytes = None
+    return {
+        "peak_memory_bytes": peak_memory_bytes,
+        "cpu_user_seconds": round(usage.ru_utime, 4),
+        "cpu_system_seconds": round(usage.ru_stime, 4),
+        "cpu_total_seconds": round(usage.ru_utime + usage.ru_stime, 4),
+    }
 
 
 def _capture_resource_metrics() -> dict[str, Any]:

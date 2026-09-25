@@ -12,7 +12,6 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import sqlalchemy as sa
 from croniter import croniter
@@ -23,19 +22,13 @@ from src.core.database import get_db_context
 from src.models.enums import EventDeliveryStatus, EventSourceType, EventStatus, ScheduleOverlapPolicy
 from src.models.orm.events import Event, EventDelivery, EventSource
 from src.repositories.events import EventSubscriptionRepository
+from src.services.cron_parser import get_schedule_zone
 
 logger = logging.getLogger(__name__)
 
 
-def _get_schedule_zone(timezone_name: str) -> ZoneInfo:
-    try:
-        return ZoneInfo(timezone_name)
-    except ZoneInfoNotFoundError as exc:
-        raise ValueError(f"Unknown timezone: {timezone_name}") from exc
-
-
 def _next_interval_seconds(cron_expression: str, now_utc: datetime, timezone_name: str) -> float:
-    zone = _get_schedule_zone(timezone_name)
+    zone = get_schedule_zone(timezone_name)
     local_now = now_utc.astimezone(zone)
     cron = croniter(cron_expression, local_now)
     first_run = cron.get_next(datetime)
@@ -51,7 +44,7 @@ def _latest_due_run_utc(
     now_utc: datetime,
     timezone_name: str,
 ) -> datetime | None:
-    zone = _get_schedule_zone(timezone_name)
+    zone = get_schedule_zone(timezone_name)
     local_now = now_utc.astimezone(zone)
     cron_iter = croniter(cron_expression, local_now)
     prev_run = cron_iter.get_prev(datetime)
@@ -269,15 +262,18 @@ async def process_schedule_sources() -> dict[str, Any]:
                         f"Created {deliveries_for_event} deliveries for schedule event: {event.id}"
                     )
 
+                    # Agent runs are persisted by enqueue_agent_run in a separate
+                    # transaction and reference this delivery by foreign key.
+                    # Make the event and deliveries durable before queueing so
+                    # that transaction can see them.
+                    await db.commit()
+
                     # Queue the deliveries using the event processor
                     from src.services.events.processor import EventProcessor
 
                     processor = EventProcessor(db)
                     queued = await processor.queue_event_deliveries(event.id)
                     results["deliveries_queued"] += queued
-
-                    # Source has been processed and its deliveries queued (if any).
-                    event.status = EventStatus.COMPLETED
 
                 except Exception as source_error:
                     error_info = {

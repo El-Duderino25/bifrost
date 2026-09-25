@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 import type { ChatProjection } from "@/lib/chat-runtime";
 
 type ChatCallback = (event: Record<string, unknown>) => void;
@@ -13,6 +14,7 @@ const mocks = vi.hoisted(() => {
 	const callbacks = {
 		chat: undefined as ChatCallback | undefined,
 		connection: undefined as ConnectionCallback | undefined,
+		platformJob: undefined as ChatCallback | undefined,
 	};
 	const generatedIds: string[] = [];
 	const store = {
@@ -62,7 +64,10 @@ vi.mock("@/services/websocket", () => ({
 			mocks.callbacks.connection = callback;
 			return vi.fn();
 		}),
-		onPlatformJobUpdate: vi.fn(() => vi.fn()),
+		onPlatformJobUpdate: vi.fn((_id: string, callback: ChatCallback) => {
+			mocks.callbacks.platformJob = callback;
+			return vi.fn();
+		}),
 	},
 }));
 
@@ -113,6 +118,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.callbacks.chat = undefined;
 	mocks.callbacks.connection = undefined;
+	mocks.callbacks.platformJob = undefined;
 	mocks.generatedIds.splice(0);
 	mocks.store.projectionsByConversation = {};
 	vi.mocked(webSocketService.isConnected).mockReturnValue(true);
@@ -270,6 +276,44 @@ describe("useChatStream", () => {
 		);
 	});
 
+	it("stops observing an artifact job that requires action", async () => {
+		renderHook(() => useChatStream({ conversationId: "conversation-1" }), {
+			wrapper: wrapper(),
+		});
+		await waitFor(() => expect(mocks.callbacks.chat).toBeDefined());
+
+		act(() => {
+			mocks.callbacks.chat?.({
+				type: "chat_run_event",
+				event_id: "event-tool-result",
+				sequence: 1,
+				conversation_id: "conversation-1",
+				run_id: "run-1",
+				payload: {
+					type: "tool_result",
+					tool_result: {
+						tool_call_id: "tool-1",
+						result: {
+							type: "platform_job",
+							kind: "video_generation",
+							job_id: "job-1",
+						},
+					},
+				},
+			});
+		});
+		await waitFor(() => expect(mocks.callbacks.platformJob).toBeDefined());
+
+		act(() => {
+			mocks.callbacks.platformJob?.({ status: "requires_action" });
+		});
+
+		expect(toast.error).toHaveBeenCalledWith(
+			"Video generation did not finish",
+			expect.any(Object),
+		);
+	});
+
 	it("replays state again after the websocket reconnects", async () => {
 		renderHook(() => useChatStream({ conversationId: "conversation-1" }), {
 			wrapper: wrapper(),
@@ -376,4 +420,32 @@ describe("useChatStream", () => {
 		expect(cancelChatRun).toHaveBeenCalledWith("run-1");
 		expect(getChatRunState).toHaveBeenCalledWith("conversation-1");
 	});
+});
+
+it("surfaces restoration failure and retries through projection hydration", async () => {
+	vi.mocked(getChatRunState).mockRejectedValueOnce(new Error("Synthetic restore failure"));
+	const { result } = renderHook(() => useChatStream({ conversationId: "conversation-1" }), { wrapper: wrapper() });
+	await waitFor(() => expect(result.current.restoreError).toBe(true));
+	expect(mocks.store.hydrateConversationProjection).not.toHaveBeenCalled();
+	act(() => result.current.retryRestore());
+	await waitFor(() => expect(result.current.restoreError).toBe(false));
+	await waitFor(() => expect(result.current.isRestoring).toBe(false));
+	expect(getChatRunState).toHaveBeenCalledTimes(2);
+	expect(mocks.store.hydrateConversationProjection).toHaveBeenCalledWith("conversation-1", expect.objectContaining({ conversation_id: "conversation-1" }), []);
+});
+
+it("clears restoration errors after reconnect and ignores an older failed replay", async () => {
+	vi.mocked(getChatRunState).mockRejectedValueOnce(new Error("Synthetic initial failure"));
+	const { result } = renderHook(() => useChatStream({ conversationId: "conversation-1" }), { wrapper: wrapper() });
+	await waitFor(() => expect(result.current.restoreError).toBe(true));
+	let rejectOld!: (error: Error) => void;
+	vi.mocked(getChatRunState).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectOld = reject; }));
+	act(() => mocks.callbacks.connection?.(true));
+	await waitFor(() => expect(result.current.isRestoring).toBe(true));
+	act(() => mocks.callbacks.connection?.(true));
+	await waitFor(() => expect(result.current.isRestoring).toBe(false));
+	expect(result.current.restoreError).toBe(false);
+	await act(async () => rejectOld(new Error("Synthetic stale failure")));
+	expect(result.current.restoreError).toBe(false);
+	expect(mocks.store.hydrateConversationProjection).toHaveBeenCalledTimes(1);
 });

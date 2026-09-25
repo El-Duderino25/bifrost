@@ -75,7 +75,12 @@ class FakeClient:
     def __init__(self) -> None:
         self.urls: list[str] = []
 
-    async def post(self, url: str, json: dict[str, Any] | None = None) -> FakeResponse:
+    async def post(
+        self,
+        url: str,
+        json: dict[str, Any] | None = None,
+        retry_transient: bool = False,
+    ) -> FakeResponse:
         self.urls.append(url)
         if url.startswith("/api/tables/") and len(self.urls) == 1:
             return FakeResponse(404, {"detail": "Table not found"}, url)
@@ -115,6 +120,7 @@ class FakeClient:
         ("upsert", ("customers", "doc-id", {"name": "Acme"}), {}),
         ("insert_batch", ("customers", [{"name": "Acme"}]), {}),
         ("upsert_batch", ("customers", [{"id": "doc-id", "data": {"name": "Acme"}}]), {}),
+        ("bulk_upsert", ("customers", [{"id": "doc-id", "data": {"name": "Acme"}}]), {}),
     ],
 )
 @pytest.mark.asyncio
@@ -143,6 +149,7 @@ async def test_solution_context_does_not_auto_create_after_404(
         ("upsert", ("customers", "doc-id", {"name": "Acme"}), {}),
         ("insert_batch", ("customers", [{"name": "Acme"}]), {}),
         ("upsert_batch", ("customers", [{"id": "doc-id", "data": {"name": "Acme"}}]), {}),
+        ("bulk_upsert", ("customers", [{"id": "doc-id", "data": {"name": "Acme"}}]), {}),
     ],
 )
 @pytest.mark.asyncio

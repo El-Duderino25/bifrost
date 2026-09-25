@@ -910,7 +910,7 @@ class TestDocumentUpsertVerb:
         self, e2e_client, platform_admin, non_admin_user, org1
     ):
         """If a row already exists, the upsert is gated by the `update` action
-        on the pre-image (same as PATCH semantics)."""
+        on both the pre-image and the post-image (same as PATCH semantics)."""
         org1_id = org1["id"]
         table_name = f"upsert_gate_{uuid4().hex[:8]}"
         # Policy: anyone can create, but only admins can update
@@ -1204,6 +1204,16 @@ class TestDocumentIdUniquePerTable:
         )
         assert get_b.status_code == 200, get_b.text
         assert get_b.json()["data"] == {"table": "b"}
+
+        query_a = e2e_client.post(
+            f"/api/tables/{table_a}/documents/query",
+            headers=platform_admin.headers,
+            json={"document_ids": [doc_id], "skip_count": True},
+        )
+        assert query_a.status_code == 200, query_a.text
+        assert [doc["data"] for doc in query_a.json()["documents"]] == [
+            {"table": "a"}
+        ]
 
     def test_same_doc_id_in_two_tables_via_insert(
         self, e2e_client, platform_admin

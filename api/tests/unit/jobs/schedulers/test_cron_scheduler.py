@@ -41,6 +41,21 @@ class _DbCtx:
         return False
 
 
+class _CommitTrackingSession:
+    """Delegate to a real session while recording transaction commits."""
+
+    def __init__(self, session):
+        self._session = session
+        self.commit_count = 0
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+    async def commit(self):
+        self.commit_count += 1
+        await self._session.commit()
+
+
 def _make_source_and_subscription(
     *,
     cron: str = "* * * * *",
@@ -157,6 +172,18 @@ async def test_schedule_evaluates_cron_in_configured_timezone(db_session):
     assert events[0].received_at.isoformat() == "2026-01-01T14:00:00+00:00"
     assert events[0].data["scheduled_time"] == "2026-01-01T14:00:00+00:00"
     assert events[0].data["timezone"] == "America/New_York"
+
+
+def test_scheduler_resolves_legacy_indianapolis_alias():
+    from src.jobs.schedulers.cron_scheduler import _latest_due_run_utc
+
+    due = _latest_due_run_utc(
+        "0 9 * * *",
+        datetime(2026, 7, 22, 13, 0, 30, tzinfo=timezone.utc),
+        "America/Indianapolis",
+    )
+
+    assert due == datetime(2026, 7, 22, 13, 0, tzinfo=timezone.utc)
 
 
 @pytest.mark.asyncio
@@ -459,6 +486,50 @@ async def test_schedule_creates_delivery_for_agent_subscription(db_session):
     assert len(deliveries) == 1, "agent subscription should produce exactly one delivery"
     assert deliveries[0].event_subscription_id == sub.id
     assert deliveries[0].workflow_id is None  # agent target carries no workflow_id
+
+
+@pytest.mark.asyncio
+async def test_schedule_commits_agent_delivery_before_queueing(db_session):
+    """AgentRun uses a separate transaction, so its delivery FK must be durable first."""
+    from src.models.orm.agents import Agent
+
+    agent = Agent(
+        id=uuid4(),
+        name="sched-agent-transaction-order",
+        system_prompt="you are a test agent",
+        created_by="test",
+    )
+    source, ss, sub = _make_source_and_subscription(target_type="agent")
+    sub.agent_id = agent.id
+    db_session.add_all([agent, source, ss, sub])
+    await db_session.commit()
+
+    tracking_session = _CommitTrackingSession(db_session)
+    mock_sub_repo = AsyncMock()
+    mock_sub_repo.get_active_for_event = AsyncMock(return_value=[sub])
+    mock_processor = AsyncMock()
+
+    async def assert_delivery_is_committed(_event_id):
+        assert tracking_session.commit_count >= 1
+        return 1
+
+    mock_processor.queue_event_deliveries = AsyncMock(
+        side_effect=assert_delivery_is_committed
+    )
+
+    from src.jobs.schedulers.cron_scheduler import process_schedule_sources
+
+    with (
+        patch(PATH_DB_CTX, return_value=_DbCtx(tracking_session)),
+        patch(PATH_IS_VALID, return_value=True),
+        patch(PATH_SUB_REPO, return_value=mock_sub_repo),
+        patch(PATH_PROCESSOR, return_value=mock_processor),
+    ):
+        results = await process_schedule_sources()
+
+    mock_processor.queue_event_deliveries.assert_awaited_once()
+    assert results["errors"] == []
+    assert results["deliveries_queued"] == 1
 
 
 @pytest.mark.asyncio

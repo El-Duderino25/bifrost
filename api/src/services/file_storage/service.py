@@ -237,11 +237,16 @@ class FileStorageService:
         self,
         path: str,
         expires_in: int = 600,
+        *,
+        response_content_type: str | None = None,
+        response_content_disposition: str | None = None,
     ) -> str:
         """Generate a presigned GET URL for direct S3 download."""
         return await self._s3_storage.generate_presigned_download_url(
             path=path,
             expires_in=expires_in,
+            response_content_type=response_content_type,
+            response_content_disposition=response_content_disposition,
         )
 
     async def record_signed_upload_metadata(
@@ -563,7 +568,7 @@ class FileStorageService:
                 if not decorator_info:
                     continue
                 decorator_name, kwargs = decorator_info
-                if decorator_name in ("workflow", "tool", "data_provider"):
+                if decorator_name in ("workflow", "tool", "data_provider", "service"):
                     func_name = node.name
                     new_function_names.add(func_name)
                     display_name = kwargs.get("name") or func_name
@@ -572,6 +577,8 @@ class FileStorageService:
                         dtype = "tool"
                     elif decorator_name == "data_provider":
                         dtype = "data_provider"
+                    elif decorator_name == "service":
+                        dtype = "service"
                     else:
                         dtype = "workflow"
                     new_decorator_info[func_name] = (dtype, display_name)

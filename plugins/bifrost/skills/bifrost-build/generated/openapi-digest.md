@@ -23,6 +23,9 @@
 | POST | `/api/admin/ai/profiles/merge` |
 | DELETE | `/api/admin/ai/profiles/{profile_id}` |
 | PATCH | `/api/admin/ai/profiles/{profile_id}` |
+| GET | `/api/admin/kubernetes/execution` |
+| PUT | `/api/admin/kubernetes/execution` |
+| GET | `/api/admin/kubernetes/status` |
 | DELETE | `/api/admin/llm/embedding-config` |
 | GET | `/api/admin/llm/embedding-config` |
 | POST | `/api/admin/llm/embedding-config` |
@@ -77,6 +80,7 @@
 | POST | `/api/agents/{agent_id}/tuning-session/dry-run` |
 | GET | `/api/applications` |
 | POST | `/api/applications` |
+| POST | `/api/applications/sdk/update` |
 | POST | `/api/applications/swap-slugs` |
 | DELETE | `/api/applications/{app_id}` |
 | PATCH | `/api/applications/{app_id}` |
@@ -104,6 +108,8 @@
 | GET | `/api/applications/{app_id}/render` |
 | POST | `/api/applications/{app_id}/replace` |
 | POST | `/api/applications/{app_id}/rollback` |
+| POST | `/api/applications/{app_id}/sdk/update` |
+| GET | `/api/applications/{app_id}/source` |
 | POST | `/api/applications/{app_id}/validate` |
 | GET | `/api/applications/{slug}` |
 | GET | `/api/audit` |
@@ -145,6 +151,7 @@
 | PUT | `/api/config/{config_id}` |
 | GET | `/api/decorator-properties` |
 | PUT | `/api/decorator-properties` |
+| POST | `/api/dependencies/availability` |
 | GET | `/api/dependencies/{entity_type}/{entity_id}` |
 | DELETE | `/api/endpoints/{workflow_id}` |
 | GET | `/api/endpoints/{workflow_id}` |
@@ -227,6 +234,9 @@
 | DELETE | `/api/forms/{form_id}/embed-secrets/{secret_id}` |
 | PATCH | `/api/forms/{form_id}/embed-secrets/{secret_id}` |
 | POST | `/api/forms/{form_id}/fields/{field_name}/options` |
+| DELETE | `/api/forms/{form_id}/logo` |
+| GET | `/api/forms/{form_id}/logo` |
+| POST | `/api/forms/{form_id}/logo` |
 | DELETE | `/api/forms/{form_id}/publication` |
 | GET | `/api/forms/{form_id}/publication` |
 | PUT | `/api/forms/{form_id}/publication` |
@@ -242,7 +252,8 @@
 | POST | `/api/github/commit` |
 | GET | `/api/github/commits` |
 | GET | `/api/github/config` |
-| POST | `/api/github/configure` |
+| POST | `/api/github/connect` |
+| POST | `/api/github/connect/preview` |
 | POST | `/api/github/create-repository` |
 | POST | `/api/github/diff` |
 | POST | `/api/github/discard` |
@@ -254,6 +265,11 @@
 | GET | `/api/github/status` |
 | POST | `/api/github/sync` |
 | POST | `/api/github/validate` |
+| GET | `/api/home` |
+| POST | `/api/home/collections` |
+| DELETE | `/api/home/collections/{collection_id}` |
+| PUT | `/api/home/collections/{collection_id}` |
+| PUT | `/api/home/preferences/{resource_key}` |
 | GET | `/api/hooks/health` |
 | GET | `/api/integrations` |
 | POST | `/api/integrations` |
@@ -264,6 +280,9 @@
 | GET | `/api/integrations/{integration_id}/config` |
 | PUT | `/api/integrations/{integration_id}/config` |
 | POST | `/api/integrations/{integration_id}/generate-sdk` |
+| DELETE | `/api/integrations/{integration_id}/logo` |
+| GET | `/api/integrations/{integration_id}/logo` |
+| POST | `/api/integrations/{integration_id}/logo` |
 | GET | `/api/integrations/{integration_id}/mappings` |
 | POST | `/api/integrations/{integration_id}/mappings` |
 | POST | `/api/integrations/{integration_id}/mappings/batch` |
@@ -469,6 +488,16 @@
 | GET | `/api/sdk/sessions/{session_id}/pending` |
 | POST | `/api/sdk/tables/create` |
 | POST | `/api/sdk/tables/list` |
+| GET | `/api/services` |
+| GET | `/api/services/{service_id}` |
+| PATCH | `/api/services/{service_id}` |
+| GET | `/api/services/{service_id}/attempts` |
+| POST | `/api/services/{service_id}/disable` |
+| POST | `/api/services/{service_id}/enable` |
+| GET | `/api/services/{service_id}/logs` |
+| POST | `/api/services/{service_id}/restart` |
+| POST | `/api/services/{service_id}/start` |
+| POST | `/api/services/{service_id}/stop` |
 | GET | `/api/settings/ai/pricing` |
 | POST | `/api/settings/ai/pricing` |
 | DELETE | `/api/settings/ai/pricing/{pricing_id}` |
@@ -486,10 +515,14 @@
 | GET | `/api/solutions/deploy-jobs/{job_id}` |
 | GET | `/api/solutions/export-jobs/{job_id}` |
 | GET | `/api/solutions/export-jobs/{job_id}/download` |
+| POST | `/api/solutions/import-workspace` |
+| POST | `/api/solutions/import-workspace/preview` |
+| POST | `/api/solutions/import-workspace/preview-repo` |
 | POST | `/api/solutions/install` |
 | POST | `/api/solutions/install/from-repo` |
 | POST | `/api/solutions/install/preview` |
 | POST | `/api/solutions/install/preview-repo` |
+| POST | `/api/solutions/sdk/update` |
 | DELETE | `/api/solutions/{solution_id}` |
 | GET | `/api/solutions/{solution_id}` |
 | PATCH | `/api/solutions/{solution_id}` |
@@ -506,6 +539,8 @@
 | POST | `/api/solutions/{solution_id}/pull/ack` |
 | GET | `/api/solutions/{solution_id}/readme` |
 | PUT | `/api/solutions/{solution_id}/readme` |
+| GET | `/api/solutions/{solution_id}/sdk/status` |
+| POST | `/api/solutions/{solution_id}/sdk/update` |
 | GET | `/api/solutions/{solution_id}/setup` |
 | POST | `/api/solutions/{solution_id}/sync` |
 | POST | `/api/solutions/{solution_id}/uninstall` |

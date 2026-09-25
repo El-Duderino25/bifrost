@@ -24,6 +24,7 @@ class ExecutableType(str, Enum):
     WORKFLOW = "workflow"
     TOOL = "tool"
     DATA_PROVIDER = "data_provider"
+    SERVICE = "service"
 
 
 # ==================== WORKFLOW PARAMETER & METADATA ====================
@@ -67,8 +68,8 @@ class WorkflowMetadata(BaseModel):
     display_name: str | None = Field(default=None, description="Optional UI display name (falls back to the tool name if not set)")
     description: str | None = Field(default=None, description="Human-readable description")
 
-    # Type discriminator - distinguishes workflow/tool/data_provider
-    type: ExecutableType = Field(default=ExecutableType.WORKFLOW, description="Executable type: workflow, tool, or data_provider")
+    # Type discriminator - distinguishes workflow/tool/data_provider/service
+    type: ExecutableType = Field(default=ExecutableType.WORKFLOW, description="Executable type: workflow, tool, data_provider, or service")
 
     # Organization scoping - NULL means global (available to all orgs)
     organization_id: str | None = Field(default=None, description="Organization ID if org-scoped, None for global")
@@ -81,6 +82,7 @@ class WorkflowMetadata(BaseModel):
 
     # Access control
     access_level: str = Field(default="role_based", description="Access level: 'authenticated' (any signed-in user except externals), 'everyone' (any signed-in user incl. externals), or 'role_based' (specific roles required)")
+    role_ids: list[str] = Field(default_factory=list, description="List of role IDs assigned to this workflow")
 
     # Optional fields with defaults
     category: str = Field(default="General", description="Category for organization")

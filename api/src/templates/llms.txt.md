@@ -120,7 +120,7 @@ Agents can run autonomously without a chat session. The agent receives input dat
 #### SDK Invocation
 
 ```python
-from bifrost import workflow, agents
+from bifrost import workflow, agents, AgentRunPending
 
 @workflow
 async def process_ticket(ticket_id: str):
@@ -137,8 +137,19 @@ async def process_ticket(ticket_id: str):
         },
         timeout=300,
     )
+    if isinstance(result, AgentRunPending):
+        return {
+            "run_id": result.run_id,
+            "status": result.last_known_status,
+            "wait_ended": result.reason,
+        }
     return result
 ```
+
+`timeout` limits how long the workflow waits, not how long the agent runs.
+Without an explicit wait limit, `agents.run()` waits until the agent completes
+or the workflow approaches its own deadline. A pending result includes the run
+ID for a later `agents.get_run(run_id)` call.
 
 #### Event-Triggered Agent Runs
 
@@ -367,7 +378,7 @@ Pick `useTable` for "Page X of Y" numbered-page UI; pick `useInfiniteTable` for 
 | `tables.upsert(table, item \| array, scope?)` | Insert or update by id. |
 | `tables.update(table, id, data, scope?)` | Patch a row's data fields. Returns `null` if missing. |
 | `tables.delete(table, id \| array, scope?)` | Delete by id; single-form is idempotent (returns `false` if missing). |
-| `tables.query(table, q?, scope?)` | One-shot read with `where`/`limit`/`offset`/`order_by`/`order_dir`/`skip_count`. |
+| `tables.query(table, q?, scope?)` | One-shot read with `document_ids`/`where`/`limit`/`offset`/`order_by`/`order_dir`/`skip_count`. |
 | `tables.count(table, scope?)` | Row count. Throws `TableNotFoundError` if missing. |
 | `tables.subscribe(tableId, filter, onEvent)` | Direct live subscription; advanced — `useTable` covers the common case. |
 
